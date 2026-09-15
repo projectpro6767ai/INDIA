@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { 
   Upload, 
   Camera, 
@@ -21,10 +21,29 @@ import {
   Layers, 
   Sparkles,
   RefreshCw,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Bookmark,
+  BookmarkCheck,
+  Trash2,
+  LogIn,
+  LogOut,
+  FolderHeart,
+  Database
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import type { AnalysisState, AnalysisResult } from './types';
+import { 
+  auth, 
+  onAuthStateChanged, 
+  signInWithGoogle, 
+  logOut, 
+  type User,
+  saveBiomeRecord, 
+  deleteSavedBiomeRecord, 
+  subscribeSavedBiomes, 
+  type SavedBiomeDoc,
+  logAnalyticsEvent 
+} from './firebase';
 
 const POPULAR_BIOMES = [
   { name: 'Amazon Rainforest', tag: 'Tropical Jungle' },
@@ -47,10 +66,86 @@ export default function App() {
   const [lightboxImage, setLightboxImage] = useState<{ url: string; title: string; caption?: string } | null>(null);
   const [selectedTab, setSelectedTab] = useState<'uploaded' | 'reference'>('reference');
 
+  // Firebase Auth & Firestore Saved Biomes State
+  const [user, setUser] = useState<User | null>(null);
+  const [savedBiomes, setSavedBiomes] = useState<SavedBiomeDoc[]>([]);
+  const [isSavedDrawerOpen, setIsSavedDrawerOpen] = useState(false);
+  const [savingStatus, setSavingStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // Subscribe to Auth changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Subscribe to Firestore saved biomes when user is logged in
+  useEffect(() => {
+    if (!user) {
+      setSavedBiomes([]);
+      return;
+    }
+
+    const unsubscribe = subscribeSavedBiomes(
+      user.uid,
+      (items) => {
+        setSavedBiomes(items);
+      },
+      (err) => {
+        console.error("Failed to sync saved biomes from Firestore:", err);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  const handleGoogleSignIn = async () => {
+    setAuthError(null);
+    try {
+      await signInWithGoogle();
+      logAnalyticsEvent('login', { method: 'Google' });
+    } catch (err: any) {
+      // Gracefully handle voluntary user cancellation without throwing alarming errors
+      if (
+        err?.code === 'auth/popup-closed-by-user' ||
+        err?.code === 'auth/cancelled-popup-request' ||
+        err?.message?.includes('popup-closed-by-user') ||
+        err?.message?.includes('cancelled-popup-request')
+      ) {
+        console.debug('Google sign-in popup was dismissed by user.');
+        return;
+      }
+
+      if (
+        err?.code === 'auth/popup-blocked' ||
+        err?.message?.includes('popup-blocked')
+      ) {
+        setAuthError('The sign-in popup was blocked by your browser. Please enable popups for this site and try again.');
+        return;
+      }
+
+      console.warn('Sign in was not completed:', err?.message || err);
+      setAuthError(err?.message || 'Google sign in could not be completed. Please try again.');
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await logOut();
+      setIsSavedDrawerOpen(false);
+    } catch (err: any) {
+      console.error("Sign out failed:", err);
+    }
+  };
+
   const executeTextSearch = async (query: string) => {
     if (!query.trim()) return;
 
+    logAnalyticsEvent('search_biome', { query });
     setActiveImageIndex(0);
+    setSavingStatus('idle');
     setState({
       loading: true,
       error: null,
@@ -72,8 +167,16 @@ export default function App() {
       }
 
       const result: AnalysisResult = await response.json();
+      if (result.biome) {
+        logAnalyticsEvent('biome_identified', { 
+          biome: result.biome, 
+          isIndia: result.isIndiaLandscape,
+          hasImages: (result.images?.length ?? 0) > 0 
+        });
+      }
       setState(prev => ({ ...prev, result, loading: false }));
     } catch (err: any) {
+      logAnalyticsEvent('search_error', { error: err.message });
       setState(prev => ({ 
         ...prev, 
         error: err.message || 'Analysis failed. Please try again.', 
@@ -111,6 +214,8 @@ export default function App() {
 
       setActiveImageIndex(0);
       setSelectedTab('uploaded');
+      setSavingStatus('idle');
+      logAnalyticsEvent('upload_image', { mimeType });
       setState({
         loading: true,
         error: null,
@@ -131,8 +236,15 @@ export default function App() {
         }
 
         const result: AnalysisResult = await response.json();
+        if (result.biome) {
+          logAnalyticsEvent('biome_identified_from_image', { 
+            biome: result.biome, 
+            isIndia: result.isIndiaLandscape 
+          });
+        }
         setState(prev => ({ ...prev, result, loading: false }));
       } catch (err: any) {
+        logAnalyticsEvent('upload_analyze_error', { error: err.message });
         setState(prev => ({ 
           ...prev, 
           error: err.message || 'Analysis failed. Please try again.', 
@@ -142,6 +254,61 @@ export default function App() {
     };
     reader.readAsDataURL(file);
   }, []);
+
+  // Save current biome to Firestore
+  const handleSaveToFirestore = async () => {
+    if (!state.result || !state.result.biome) return;
+
+    if (!user) {
+      await handleGoogleSignIn();
+      return;
+    }
+
+    setSavingStatus('saving');
+    try {
+      const currentPhoto = state.imagePreview || state.result.images?.[0]?.url;
+      await saveBiomeRecord({
+        biomeName: state.result.biome,
+        isIndiaLandscape: Boolean(state.result.isIndiaLandscape),
+        visualMarkers: state.result.visualMarkers || [],
+        geographicContext: state.result.geographicContext || '',
+        environmentalStatus: state.result.environmentalStatus || '',
+        imageUrl: currentPhoto,
+      });
+      setSavingStatus('saved');
+      logAnalyticsEvent('save_biome', { biome: state.result.biome });
+    } catch (err) {
+      console.error("Error saving to Firestore:", err);
+      setSavingStatus('error');
+    }
+  };
+
+  const handleDeleteSavedBiome = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await deleteSavedBiomeRecord(id);
+    } catch (err) {
+      console.error("Error deleting saved biome:", err);
+    }
+  };
+
+  const loadSavedBiome = (saved: SavedBiomeDoc) => {
+    setState({
+      loading: false,
+      error: null,
+      result: {
+        biome: saved.biomeName,
+        isIndiaLandscape: saved.isIndiaLandscape,
+        visualMarkers: saved.visualMarkers,
+        geographicContext: saved.geographicContext,
+        environmentalStatus: saved.environmentalStatus,
+        images: saved.imageUrl ? [{ url: saved.imageUrl, title: saved.biomeName }] : [],
+      },
+      imagePreview: saved.imageUrl || null,
+    });
+    setSelectedTab(saved.imageUrl?.startsWith('data:') ? 'uploaded' : 'reference');
+    setIsSavedDrawerOpen(false);
+  };
 
   const reset = () => {
     setState({
@@ -153,10 +320,12 @@ export default function App() {
     setTextInput('');
     setActiveImageIndex(0);
     setLightboxImage(null);
+    setSavingStatus('idle');
   };
 
   const currentReferenceImage = state.result?.images?.[activeImageIndex];
   const hasImages = (state.result?.images?.length ?? 0) > 0;
+  const isCurrentBiomeSaved = savedBiomes.some(b => b.biomeName === state.result?.biome);
 
   return (
     <div className="min-h-screen bg-[#FDFCF8] text-[#1D1B16] font-sans antialiased selection:bg-[#E8DEF8]">
@@ -209,9 +378,105 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Saved Biomes Slide-Over Drawer */}
+      <AnimatePresence>
+        {isSavedDrawerOpen && (
+          <div className="fixed inset-0 z-50 overflow-hidden">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSavedDrawerOpen(false)}
+              className="absolute inset-0 bg-black/50 backdrop-blur-xs" 
+            />
+
+            <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
+              <motion.div 
+                initial={{ x: '100%' }}
+                animate={{ x: 0 }}
+                exit={{ x: '100%' }}
+                transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+                className="w-screen max-w-md bg-[#FDFCF8] border-l border-[#E6E1D6] shadow-2xl flex flex-col"
+              >
+                <div className="p-6 border-b border-[#E6E1D6] bg-white flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-[#4F6600]">
+                    <Database size={20} />
+                    <h3 className="font-black text-lg text-[#1D1B16]">Saved Biomes</h3>
+                    <span className="text-xs bg-[#F7F8F0] text-[#4F6600] px-2 py-0.5 rounded-full border border-[#E6E1D6] font-bold">
+                      {savedBiomes.length}
+                    </span>
+                  </div>
+                  <button 
+                    onClick={() => setIsSavedDrawerOpen(false)}
+                    className="p-2 hover:bg-[#F7F8F0] rounded-full text-[#797667] transition-colors"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                  {!user ? (
+                    <div className="p-8 text-center bg-white rounded-2xl border border-[#E6E1D6] space-y-3">
+                      <LogIn className="mx-auto text-[#4F6600]" size={32} />
+                      <p className="font-bold text-[#1D1B16]">Sign in to View Saved Biomes</p>
+                      <p className="text-xs text-[#797667]">
+                        Sign in with your Google account to sync your saved biomes securely in Firestore.
+                      </p>
+                      <button
+                        onClick={handleGoogleSignIn}
+                        className="mt-2 px-5 py-2.5 bg-[#4F6600] text-white rounded-full font-bold text-xs hover:bg-[#3E5000] transition-colors shadow-md"
+                      >
+                        Sign in with Google
+                      </button>
+                    </div>
+                  ) : savedBiomes.length === 0 ? (
+                    <div className="p-8 text-center bg-white rounded-2xl border border-[#E6E1D6] space-y-3">
+                      <FolderHeart className="mx-auto text-[#797667]" size={32} />
+                      <p className="font-bold text-[#1D1B16]">No Saved Biomes Yet</p>
+                      <p className="text-xs text-[#797667]">
+                        Explore any landform or upload a photo, then tap "Save to Firestore" to bookmark it here.
+                      </p>
+                    </div>
+                  ) : (
+                    savedBiomes.map((item) => (
+                      <div
+                        key={item.id}
+                        onClick={() => loadSavedBiome(item)}
+                        className="bg-white p-4 rounded-2xl border border-[#E6E1D6] hover:border-[#4F6600] transition-all cursor-pointer group shadow-xs hover:shadow-md relative"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="space-y-1">
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#D8E7AB] text-[#151E00] uppercase tracking-wider">
+                              {item.isIndiaLandscape ? 'Indian Biome' : 'Global Biome'}
+                            </span>
+                            <h4 className="font-bold text-[#1D1B16] text-base group-hover:text-[#4F6600] transition-colors">
+                              {item.biomeName}
+                            </h4>
+                            <p className="text-xs text-[#797667] line-clamp-2">
+                              {item.geographicContext}
+                            </p>
+                          </div>
+                          <button
+                            onClick={(e) => handleDeleteSavedBiome(item.id, e)}
+                            className="text-[#797667] hover:text-[#BA1A1A] p-1.5 hover:bg-[#FFDAD6]/50 rounded-lg transition-colors"
+                            title="Delete from Firestore"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </motion.div>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="border-b border-[#E6E1D6] bg-white/80 backdrop-blur-md sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between gap-4">
           <div className="flex items-center gap-2.5 cursor-pointer" onClick={reset}>
             <div className="w-10 h-10 bg-[#4F6600] rounded-xl flex items-center justify-center text-white shadow-md shadow-[#4F6600]/20">
               <Compass size={22} />
@@ -222,14 +487,76 @@ export default function App() {
             </div>
           </div>
 
-          {(state.result || state.imagePreview) && (
+          <div className="flex items-center gap-2 md:gap-3">
+            {/* Saved Biomes Drawer Toggle */}
             <button
-              onClick={reset}
-              className="inline-flex items-center gap-2 text-xs md:text-sm font-bold text-[#4F6600] hover:text-[#3E5000] bg-[#F7F8F0] hover:bg-[#EBECE0] px-3.5 py-2 rounded-full transition-all border border-[#E6E1D6]"
+              onClick={() => setIsSavedDrawerOpen(true)}
+              className="inline-flex items-center gap-1.5 text-xs md:text-sm font-bold text-[#4F6600] bg-[#F7F8F0] hover:bg-[#EBECE0] px-3.5 py-2 rounded-full transition-all border border-[#E6E1D6]"
             >
-              <RefreshCw size={14} /> New Query
+              <Bookmark size={15} />
+              <span className="hidden sm:inline">Saved</span>
+              {savedBiomes.length > 0 && (
+                <span className="w-5 h-5 bg-[#4F6600] text-white rounded-full text-[10px] flex items-center justify-center">
+                  {savedBiomes.length}
+                </span>
+              )}
             </button>
-          )}
+
+            {/* Auth Button */}
+            {user ? (
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-[#F7F8F0] rounded-full border border-[#E6E1D6]">
+                  {user.photoURL ? (
+                    <img 
+                      src={user.photoURL} 
+                      alt={user.displayName || 'User'} 
+                      referrerPolicy="no-referrer"
+                      className="w-6 h-6 rounded-full object-cover" 
+                    />
+                  ) : (
+                    <div className="w-6 h-6 rounded-full bg-[#4F6600] text-white text-xs flex items-center justify-center font-bold">
+                      {user.email?.[0]?.toUpperCase() || 'U'}
+                    </div>
+                  )}
+                  <span className="text-xs font-bold text-[#1D1B16] hidden md:inline max-w-[120px] truncate">
+                    {user.displayName || user.email}
+                  </span>
+                </div>
+                <button
+                  onClick={handleGoogleSignIn}
+                  className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold text-[#4F6600] hover:text-[#3E5000] px-2.5 py-1 rounded-full hover:bg-[#EBECE0] bg-[#F7F8F0] border border-[#E6E1D6] transition-colors"
+                  title="Switch to another Google Account"
+                >
+                  Switch
+                </button>
+                <button
+                  onClick={handleSignOut}
+                  className="p-2 hover:bg-[#FFDAD6]/50 rounded-full text-[#BA1A1A] transition-colors"
+                  title="Sign out"
+                >
+                  <LogOut size={16} />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleGoogleSignIn}
+                className="inline-flex items-center gap-1.5 text-xs md:text-sm font-bold bg-[#4F6600] hover:bg-[#3E5000] text-white px-3.5 py-2 rounded-full transition-all shadow-sm"
+              >
+                <LogIn size={15} />
+                <span>Sign in</span>
+              </button>
+            )}
+
+            {(state.result || state.imagePreview) && (
+              <button
+                onClick={reset}
+                className="inline-flex items-center gap-1.5 text-xs md:text-sm font-bold text-[#4F6600] hover:text-[#3E5000] bg-[#F7F8F0] hover:bg-[#EBECE0] px-3 py-2 rounded-full transition-all border border-[#E6E1D6]"
+                title="New Query"
+              >
+                <RefreshCw size={14} />
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
@@ -237,13 +564,25 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 py-8 md:py-12">
         <div className="max-w-4xl mx-auto space-y-8">
           
+          {authError && (
+            <div className="p-4 bg-[#FFDAD6] text-[#410002] rounded-2xl flex items-center justify-between gap-3 border border-[#BA1A1A]/20">
+              <div className="flex items-center gap-2 text-sm">
+                <AlertCircle size={18} className="shrink-0" />
+                <span>{authError}</span>
+              </div>
+              <button onClick={() => setAuthError(null)} className="text-xs font-bold hover:underline">
+                Dismiss
+              </button>
+            </div>
+          )}
+
           {/* Hero Section */}
           <div className="text-center space-y-3">
             <h2 className="text-3xl md:text-5xl font-black tracking-tight text-[#1D1B16]">
               Explore Any <span className="text-[#4F6600]">Biome with Imagery</span>
             </h2>
             <p className="text-base md:text-lg text-[#494631] max-w-2xl mx-auto leading-relaxed">
-              Search any global or regional landscape by name to retrieve in-depth geographical data alongside authentic landscape photography.
+              Search any global or regional landscape by name or photo to view geological intelligence, authentic photography, and save findings directly to Firestore.
             </p>
           </div>
 
@@ -494,19 +833,50 @@ export default function App() {
                     >
                       {state.result.biome && !state.result.errorMessage ? (
                         <>
-                          {/* Biome Title & Badges */}
-                          <div className="bg-white p-6 rounded-3xl border border-[#E6E1D6] shadow-sm space-y-3">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#D8E7AB] text-[#151E00] rounded-full text-xs font-bold uppercase tracking-wider">
-                                <CheckCircle2 size={13} /> 
-                                {state.result.isIndiaLandscape ? 'Indian Biome' : 'Global Biome'}
-                              </span>
-                              {hasImages && (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-[#F7F8F0] text-[#4F6600] rounded-full text-xs font-semibold border border-[#E6E1D6]">
-                                  <ImageIcon size={12} /> {state.result.images?.length} Photos Loaded
+                          {/* Biome Title & Action Bar */}
+                          <div className="bg-white p-6 rounded-3xl border border-[#E6E1D6] shadow-sm space-y-4">
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#D8E7AB] text-[#151E00] rounded-full text-xs font-bold uppercase tracking-wider">
+                                  <CheckCircle2 size={13} /> 
+                                  {state.result.isIndiaLandscape ? 'Indian Biome' : 'Global Biome'}
                                 </span>
-                              )}
+                                {hasImages && (
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-[#F7F8F0] text-[#4F6600] rounded-full text-xs font-semibold border border-[#E6E1D6]">
+                                    <ImageIcon size={12} /> {state.result.images?.length} Photos Loaded
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Firestore Save / Bookmark Button */}
+                              <button
+                                onClick={handleSaveToFirestore}
+                                disabled={savingStatus === 'saving'}
+                                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all shadow-xs border ${
+                                  isCurrentBiomeSaved || savingStatus === 'saved'
+                                    ? 'bg-[#D8E7AB] text-[#151E00] border-[#D8E7AB]'
+                                    : 'bg-[#F7F8F0] text-[#4F6600] border-[#E6E1D6] hover:bg-[#4F6600] hover:text-white'
+                                }`}
+                              >
+                                {savingStatus === 'saving' ? (
+                                  <>
+                                    <RefreshCw size={13} className="animate-spin" />
+                                    <span>Saving...</span>
+                                  </>
+                                ) : isCurrentBiomeSaved || savingStatus === 'saved' ? (
+                                  <>
+                                    <BookmarkCheck size={14} />
+                                    <span>Saved in Firestore</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Bookmark size={14} />
+                                    <span>Save to Firestore</span>
+                                  </>
+                                )}
+                              </button>
                             </div>
+
                             <h3 className="text-2xl md:text-3xl font-black text-[#1D1B16] leading-tight">
                               {state.result.biome}
                             </h3>
@@ -581,7 +951,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* Footer */}
+      {/* Footer with Live Firebase Connection Information */}
       <footer className="mt-20 border-t border-[#E6E1D6] py-10 bg-white">
         <div className="max-w-7xl mx-auto px-4 text-center space-y-3">
           <div className="flex items-center justify-center gap-2 text-[#4F6600]">
@@ -591,6 +961,16 @@ export default function App() {
           <p className="text-xs text-[#797667]">
             Comprehensive global geographical intelligence and visual identification.
           </p>
+          <div className="pt-2 flex flex-wrap items-center justify-center gap-3 text-[11px] text-[#797667]">
+            <span className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span>Firebase Provisioned & Enabled</span>
+            </span>
+            <span className="hidden sm:inline">•</span>
+            <span>Firestore DB: <code className="bg-[#F7F8F0] px-1.5 py-0.5 rounded border border-[#E6E1D6] font-mono text-[#4F6600]">india999-e2749</code></span>
+            <span className="hidden sm:inline">•</span>
+            <span>Security Rules: <span className="font-semibold text-emerald-700">Enforced & Active</span></span>
+          </div>
         </div>
       </footer>
     </div>

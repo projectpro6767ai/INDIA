@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidSavedBiome(data, userId) {
+      return data.userId == userId &&
+        data.userId is string && data.userId.size() <= 128 &&
+        data.biomeName is string && data.biomeName.size() > 0 && data.biomeName.size() <= 200 &&
+        data.isIndiaLandscape is bool &&
+        data.geographicContext is string && data.geographicContext.size() <= 5000 &&
+        data.environmentalStatus is string && data.environmentalStatus.size() <= 5000 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 2000)) &&
+        (!('visualMarkers' in data) || (data.visualMarkers is list && data.visualMarkers.size() <= 20));
+    }
+
+    match /users/{userId}/savedBiomes/{biomeId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) &&
+        isValidSavedBiome(incoming(), userId) &&
+        incoming().userId == userId;
+      allow update: if isOwner(userId) &&
+        isValidSavedBiome(incoming(), userId) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(userId);
+    }
+  }
+}

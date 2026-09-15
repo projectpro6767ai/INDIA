@@ -1,0 +1,51 @@
+{
+  "entities": {
+    "savedBiome": {
+      "title": "Saved Biome",
+      "description": "A saved biome exploration or bookmark by a user",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the user who saved this biome"
+        },
+        "biomeName": {
+          "type": "string",
+          "description": "Name of the identified biome"
+        },
+        "isIndiaLandscape": {
+          "type": "boolean",
+          "description": "Whether this landscape is within India"
+        },
+        "visualMarkers": {
+          "type": "array",
+          "description": "Key visual terrain markers identified"
+        },
+        "geographicContext": {
+          "type": "string",
+          "description": "Climatic and geographic explanation"
+        },
+        "environmentalStatus": {
+          "type": "string",
+          "description": "Conservation status and sensitivity"
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Reference or uploaded image URL"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this exploration was saved"
+        }
+      },
+      "required": ["userId", "biomeName", "isIndiaLandscape", "geographicContext", "environmentalStatus", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/savedBiomes/{biomeId}": {
+      "schema": "savedBiome",
+      "description": "Saved biome explorations belonging to a user"
+    }
+  }
+}
