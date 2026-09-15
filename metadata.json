@@ -1,0 +1,6 @@
+{
+  "name": "Biome Expert",
+  "description": "Identify physical landforms and biomes globally from images or text using AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
