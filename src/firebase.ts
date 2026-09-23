@@ -32,7 +32,7 @@ export const firebaseConfig = {
   projectId: "india999-e2749",
   storageBucket: "india999-e2749.firebasestorage.app",
   messagingSenderId: "724401564319",
-  appId: "1:724401564319:web:d40031febb214b686d10aa",
+  appId: "1:724401564319:web:d8112766f5f562136d10aa",
   measurementId: "G-3RXETJLGR8",
   ...firebaseConfigFile,
 };

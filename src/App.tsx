@@ -177,31 +177,72 @@ export default function App() {
         body: JSON.stringify({ textQuery: query }),
       });
 
+      const contentType = response.headers.get('content-type') || '';
+
       if (!response.ok) {
         let errMsg = 'Failed to analyze region';
         try {
-          const errorData = await response.json();
-          if (errorData.error) errMsg = errorData.error;
-        } catch {
-          if (response.status === 404) {
-            errMsg = 'API route not found (404). Ensure Vercel serverless functions are deployed.';
+          if (contentType.includes('application/json')) {
+            const errorData = await response.json();
+            if (errorData.error) errMsg = errorData.error;
           } else {
-            errMsg = `Server returned status ${response.status}. Please check Vercel function logs.`;
+            const text = await response.text();
+            if (response.status === 404 || text.includes('404')) {
+              errMsg = 'API endpoint not found. Ensure serverless functions and GEMINI_API_KEY environment variable are deployed.';
+            } else {
+              errMsg = `Server error (status ${response.status}).`;
+            }
           }
+        } catch {
+          errMsg = `Server error (${response.status}).`;
         }
         throw new Error(errMsg);
       }
 
-      const result: AnalysisResult = await response.json();
-      
-      // Client-side fallback enrichment if climaticData or images are missing
-      const curatedMatch = findCuratedBiome(query, result?.biome);
-      if (curatedMatch) {
-        if (!result.climaticData || result.climaticData.length === 0) {
-          result.climaticData = curatedMatch.climaticData;
+      if (!contentType.includes('application/json')) {
+        const offlineCurated = findCuratedBiome(query);
+        if (offlineCurated) {
+          setState(prev => ({
+            ...prev,
+            loading: false,
+            error: null,
+            result: {
+              biome: offlineCurated.canonicalName,
+              isIndiaLandscape: offlineCurated.isIndiaLandscape,
+              visualMarkers: offlineCurated.visualMarkers,
+              geographicContext: offlineCurated.geographicContext,
+              environmentalStatus: offlineCurated.environmentalStatus,
+              climaticData: offlineCurated.climaticData,
+              images: offlineCurated.photos,
+            },
+            imagePreview: null,
+          }));
+          return;
         }
-        if (!result.images || result.images.length === 0) {
-          result.images = curatedMatch.photos;
+        throw new Error('Server returned an unexpected non-JSON response. Please verify deployment settings.');
+      }
+
+      const result: AnalysisResult = await response.json();
+
+      // Validate result format on client
+      const rawBiome = String(result?.biome || '').trim();
+      const isInvalid = !rawBiome || 
+        ['n/a', 'na', 'none', 'unknown', 'invalid', 'null', 'undefined', 'not applicable', 'unidentified'].includes(rawBiome.toLowerCase());
+      if (isInvalid) {
+        result.biome = '';
+        result.errorMessage = result.errorMessage || `"${query}" is not recognized as a natural landscape or biome. Please enter a valid biome (e.g., Western Ghats, Amazon Rainforest, Cold Desert of Ladakh, Thar Desert, or Sundarbans).`;
+        result.images = [];
+        result.climaticData = [];
+      } else {
+        // Client-side fallback enrichment if climaticData or images are missing
+        const curatedMatch = findCuratedBiome(query, result?.biome);
+        if (curatedMatch) {
+          if (!result.climaticData || result.climaticData.length === 0) {
+            result.climaticData = curatedMatch.climaticData;
+          }
+          if (!result.images || result.images.length === 0) {
+            result.images = curatedMatch.photos;
+          }
         }
       }
 
@@ -290,28 +331,50 @@ export default function App() {
           body: JSON.stringify({ image: base64Data, mimeType }),
         });
 
+        const contentType = response.headers.get('content-type') || '';
+
         if (!response.ok) {
           let errMsg = 'Failed to analyze image';
           try {
-            const errorData = await response.json();
-            if (errorData.error) errMsg = errorData.error;
-          } catch {
-            if (response.status === 404) {
-              errMsg = 'API route not found (404). Ensure Vercel serverless functions are deployed.';
+            if (contentType.includes('application/json')) {
+              const errorData = await response.json();
+              if (errorData.error) errMsg = errorData.error;
             } else {
-              errMsg = `Server returned status ${response.status}. Please check Vercel function logs.`;
+              const text = await response.text();
+              if (response.status === 404 || text.includes('404')) {
+                errMsg = 'API endpoint not found. Ensure serverless functions and GEMINI_API_KEY environment variable are deployed.';
+              } else {
+                errMsg = `Server error (status ${response.status}).`;
+              }
             }
+          } catch {
+            errMsg = `Server error (${response.status}).`;
           }
           throw new Error(errMsg);
         }
 
+        if (!contentType.includes('application/json')) {
+          throw new Error('Server returned an unexpected non-JSON response. Please verify deployment settings.');
+        }
+
         const result: AnalysisResult = await response.json();
 
-        // Enrich climaticData from curated catalog if missing
-        if (result && result.biome && (!result.climaticData || result.climaticData.length === 0)) {
-          const curatedMatch = findCuratedBiome(undefined, result.biome);
-          if (curatedMatch && curatedMatch.climaticData) {
-            result.climaticData = curatedMatch.climaticData;
+        // Validate that image resulted in an actual biome
+        const rawBiome = String(result?.biome || '').trim();
+        const isInvalid = !rawBiome || 
+          ['n/a', 'na', 'none', 'unknown', 'invalid', 'null', 'undefined', 'not applicable', 'unidentified'].includes(rawBiome.toLowerCase());
+        if (isInvalid) {
+          result.biome = '';
+          result.errorMessage = result.errorMessage || "The uploaded image does not appear to show an outdoor natural landscape or biome. Please upload a clear photo of natural terrain, vegetation, or a landform.";
+          result.images = [];
+          result.climaticData = [];
+        } else {
+          // Enrich climaticData from curated catalog if missing
+          if (!result.climaticData || result.climaticData.length === 0) {
+            const curatedMatch = findCuratedBiome(undefined, result.biome);
+            if (curatedMatch && curatedMatch.climaticData) {
+              result.climaticData = curatedMatch.climaticData;
+            }
           }
         }
 

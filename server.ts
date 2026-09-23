@@ -223,30 +223,39 @@ const analyzeHandler: express.RequestHandler = async (req, res) => {
       return;
     }
 
-    const prompt = `You are an AI visual and geographical expert trained in identifying physical landforms and biomes.
+    const prompt = `You are an AI visual and geographical expert trained in identifying physical landforms, ecosystems, and natural biomes.
     
 ${image ? 'Analyze the provided image.' : `Analyze the following region/biome: "${textQuery}".`}
 
-Identify the biome or geographical zone with high precision.
-If it's in India, provide specific details. If it's a global biome (such as the Amazon rainforest, Sahara Desert, or Serengeti), provide accurate global details.
+CRITICAL VALIDATION INSTRUCTIONS:
+1. If the input (text query or image) DOES NOT describe or depict a natural outdoor physical landscape, biome, ecosystem, national park, or geographical terrain (for example: greetings like 'hello', everyday objects, indoor scenes, people, abstract words, or arbitrary text):
+   - Set "biome" to "" (empty string).
+   - Set "errorMessage" to a polite explanation stating that the input "${textQuery || 'provided'}" is not a recognized natural landscape or biome, and suggest examples of valid biomes (e.g. Western Ghats, Amazon Rainforest, Cold Desert of Ladakh, Thar Desert, Sundarbans).
+   - Set "visualMarkers" to [].
+   - Set "climaticData" to [].
+   - Set "searchKeyword" to "".
+   - Set "isIndiaLandscape" to false.
+2. If the input IS a valid landscape or biome:
+   - Identify the exact biome or geographical zone with high precision.
+   - If it's in India, provide specific details and set "isIndiaLandscape" to true. If it's a global biome (such as Amazon rainforest, Sahara Desert, Serengeti, Taiga), provide accurate details and set "isIndiaLandscape" to false.
+   - Provide 3 to 5 distinct physical visualMarkers (terrain, flora, geological formations).
+   - Provide realistic 12-month climaticData (monthly temperature low/high in °C and precipitation in mm).
+   - Set "errorMessage" to "".
 
 Provide your response in JSON format with the following structure:
 {
-  "biome": "Precise name of the biome/region (e.g., 'Amazon Rainforest', 'Cold Desert of Ladakh', 'Sundarbans Mangroves', 'Western Ghats Shola', 'Great Rann of Kutch', 'Thar Desert Dunes')",
+  "biome": "Precise name of the biome/region (e.g., 'Amazon Rainforest', 'Cold Desert of Ladakh', 'Sundarbans Mangroves', 'Western Ghats Shola', 'Great Rann of Kutch', 'Thar Desert Dunes') or empty string if invalid",
   "visualMarkers": ["terrain/vegetation marker 1", "marker 2", "marker 3"],
   "geographicContext": "Detailed explanation of climate, altitude, and physical geography",
   "environmentalStatus": "Conservation notes and climate sensitivity",
   "isIndiaLandscape": true/false,
   "climaticData": [
     { "month": "Jan", "tempLow": 10, "tempHigh": 20, "precipitation": 5 },
-    { "month": "Feb", "tempLow": 12, "tempHigh": 22, "precipitation": 10 },
-    ... continue for all 12 months with accurate data for this specific biome
+    { "month": "Feb", "tempLow": 12, "tempHigh": 22, "precipitation": 10 }
   ],
-  "searchKeyword": "Exact canonical Wikipedia article title for this location/landform (e.g. 'Amazon rainforest', 'Ladakh', 'Sundarbans', 'Western Ghats', 'Great Rann of Kutch', 'Thar Desert', 'Spiti Valley', 'Kaziranga National Park', 'Valley of Flowers National Park')",
-  "errorMessage": "Polite error message if the input is invalid or unclear"
-}
-
-For text-only queries, base your "visualMarkers" on typical characteristics one would see in photos of that region.`;
+  "searchKeyword": "Exact canonical Wikipedia article title for this location/landform (e.g. 'Amazon rainforest', 'Ladakh', 'Sundarbans', 'Western Ghats', 'Great Rann of Kutch', 'Thar Desert', 'Spiti Valley')",
+  "errorMessage": "Helpful error message if the input is not a recognized biome, otherwise empty string"
+}`;
 
     const parts: any[] = [{ text: prompt }];
     if (image && mimeType) {
@@ -255,8 +264,27 @@ For text-only queries, base your "visualMarkers" on typical characteristics one 
 
     const result = await generateContentWithRetry(parts);
 
+    // Validate that the result is an actual physical landscape or biome
+    const rawBiome = String(result?.biome || '').trim();
+    const isInvalidBiome = !rawBiome || 
+      ['n/a', 'na', 'none', 'unknown', 'invalid', 'null', 'undefined', 'not applicable', 'not a biome', 'unidentified'].includes(rawBiome.toLowerCase()) ||
+      Boolean(result?.errorMessage && result.errorMessage.trim().length > 0);
+
+    if (isInvalidBiome) {
+      result.biome = '';
+      result.errorMessage = result.errorMessage || 
+        (textQuery 
+          ? `"${textQuery}" could not be identified as a physical landscape or biome. Please enter a valid geographical biome (e.g., Western Ghats, Cold Desert of Ladakh, Amazon Rainforest, Thar Desert, or Sundarbans).`
+          : "The uploaded image does not appear to show an outdoor natural landscape or biome. Please upload a clear photo of natural terrain, vegetation, or a landform.");
+      result.images = [];
+      result.climaticData = [];
+      result.visualMarkers = [];
+      res.json(result);
+      return;
+    }
+
     // Verify & enrich climaticData from verified curated catalog if missing or incomplete
-    if (result && result.biome && (!result.climaticData || result.climaticData.length < 12)) {
+    if (result.biome && (!result.climaticData || result.climaticData.length < 12)) {
       const curatedMatch = findCuratedBiome(textQuery, result.biome);
       if (curatedMatch && curatedMatch.climaticData) {
         result.climaticData = curatedMatch.climaticData;
@@ -264,7 +292,7 @@ For text-only queries, base your "visualMarkers" on typical characteristics one 
     }
 
     // Fetch authentic images for the identified biome
-    if (result && result.biome) {
+    if (result.biome) {
       try {
         const fetchedImages = await fetchBiomeImages(result.searchKeyword, result.biome, textQuery);
         result.images = fetchedImages;
