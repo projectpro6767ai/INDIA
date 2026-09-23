@@ -13,6 +13,14 @@ const port = 3000;
 // Increase limit for base64 images
 app.use(express.json({ limit: '10mb' }));
 
+// Handle Netlify function path rewriting if invoked via /.netlify/functions/api
+app.use((req, res, next) => {
+  if (req.url.startsWith('/.netlify/functions/api')) {
+    req.url = req.url.replace(/^\/\.netlify\/functions\/api/, '') || '/';
+  }
+  next();
+});
+
 let aiClient: GoogleGenAI | null = null;
 
 function getAI(): GoogleGenAI {
@@ -128,12 +136,17 @@ async function fetchBiomeImages(keyword: string | undefined, biomeName: string, 
   const seenFiles = new Set<string>();
   const badPatterns = /\b(map|locator|flag|coat of arms|seal|emblem|icon|logo|chart|diagram|stamp|location|district|state|border|route|schema|symbol|infobox|svg|gulfs)\b/i;
 
+  const cleanKeyword = (keyword || '').length > 50 || (keyword || '').includes('.')
+    ? (keyword || '').split(/[,.\n]/)[0].trim()
+    : keyword?.trim();
+
   const searchCandidates = [
-    keyword,
+    cleanKeyword,
     textQuery,
-    biomeName,
+    biomeName?.replace(/[,(].*/, '').trim(),
     biomeName?.replace(/of.*/i, '').trim(),
-  ].filter((t): t is string => Boolean(t && t.trim().length > 1));
+    biomeName,
+  ].filter((t): t is string => Boolean(t && t.trim().length > 1 && t.trim().length <= 60 && !t.includes('.')));
 
   for (const term of searchCandidates) {
     if (images.length >= 4) break;
@@ -225,26 +238,31 @@ const analyzeHandler: express.RequestHandler = async (req, res) => {
 
     const prompt = `You are an AI visual and geographical expert trained in identifying physical landforms, ecosystems, and natural biomes.
     
-${image ? 'Analyze the provided image.' : `Analyze the following region/biome: "${textQuery}".`}
+${image ? 'Analyze the provided image.' : `Analyze the following region, country, state, or landscape: "${textQuery}".`}
 
-CRITICAL VALIDATION INSTRUCTIONS:
-1. If the input (text query or image) DOES NOT describe or depict a natural outdoor physical landscape, biome, ecosystem, national park, or geographical terrain (for example: greetings like 'hello', everyday objects, indoor scenes, people, abstract words, or arbitrary text):
+INSTRUCTIONS:
+1. The input can be:
+   - A specific natural biome or landform (e.g., 'Western Ghats', 'Sundarbans', 'Cold Desert of Ladakh', 'Amazon Rainforest', 'Thar Desert').
+   - A country, state, province, or geographic territory (e.g., 'China', 'Maharashtra', 'India', 'Japan', 'California', 'Rajasthan', 'Kerala', 'Egypt', 'Australia', 'Brazil').
+   WHEN a country, state, or region is provided, identify its primary, most ecologically defining natural landscape/biome (for example: for 'Maharashtra', identify the 'Northern Western Ghats & Deccan Plateau (Sahyadri Range)'; for 'China', identify the 'Tibetan Plateau & Himalayan Steppe' or 'South China Karst'; for 'California', identify 'California Chaparral & Sierra Nevada Montane Forests').
+2. ONLY if the input is purely non-geographical and has zero natural landscape association (e.g., greetings like 'hello', manufactured inanimate objects like 'car', indoor scenes, abstract words, or arbitrary text):
    - Set "biome" to "" (empty string).
-   - Set "errorMessage" to a polite explanation stating that the input "${textQuery || 'provided'}" is not a recognized natural landscape or biome, and suggest examples of valid biomes (e.g. Western Ghats, Amazon Rainforest, Cold Desert of Ladakh, Thar Desert, Sundarbans).
+   - Set "errorMessage" to a polite explanation stating that "${textQuery || 'the provided input'}" is not a recognized geographical location, state, or biome, and suggest examples of valid locations.
    - Set "visualMarkers" to [].
    - Set "climaticData" to [].
    - Set "searchKeyword" to "".
    - Set "isIndiaLandscape" to false.
-2. If the input IS a valid landscape or biome:
-   - Identify the exact biome or geographical zone with high precision.
-   - If it's in India, provide specific details and set "isIndiaLandscape" to true. If it's a global biome (such as Amazon rainforest, Sahara Desert, Serengeti, Taiga), provide accurate details and set "isIndiaLandscape" to false.
-   - Provide 3 to 5 distinct physical visualMarkers (terrain, flora, geological formations).
+3. If the input IS a valid geographical place, region, country, state, or natural biome:
+   - Identify the exact biome or physical landscape name with high precision.
+   - If located within India (such as Maharashtra, Ladakh, Western Ghats, Thar, Assam, Kerala), set "isIndiaLandscape" to true. If global (such as China, Amazon, Sahara, Japan, Serengeti), set "isIndiaLandscape" to false.
+   - Provide 3 to 5 distinct physical visual markers (terrain features, native vegetation, geological formations).
    - Provide realistic 12-month climaticData (monthly temperature low/high in °C and precipitation in mm).
+   - Set "searchKeyword" to a concise 1 to 4 word canonical Wikipedia article title (e.g., 'Western Ghats', 'Tibetan Plateau', 'Sundarbans', 'Thar Desert'). DO NOT write full sentences or explanations in searchKeyword.
    - Set "errorMessage" to "".
 
 Provide your response in JSON format with the following structure:
 {
-  "biome": "Precise name of the biome/region (e.g., 'Amazon Rainforest', 'Cold Desert of Ladakh', 'Sundarbans Mangroves', 'Western Ghats Shola', 'Great Rann of Kutch', 'Thar Desert Dunes') or empty string if invalid",
+  "biome": "Precise name of the biome/region (e.g., 'Western Ghats (Sahyadri Range)', 'Tibetan Plateau & Alpine Steppe', 'Thar Desert Dunes') or empty string if invalid",
   "visualMarkers": ["terrain/vegetation marker 1", "marker 2", "marker 3"],
   "geographicContext": "Detailed explanation of climate, altitude, and physical geography",
   "environmentalStatus": "Conservation notes and climate sensitivity",
@@ -253,8 +271,8 @@ Provide your response in JSON format with the following structure:
     { "month": "Jan", "tempLow": 10, "tempHigh": 20, "precipitation": 5 },
     { "month": "Feb", "tempLow": 12, "tempHigh": 22, "precipitation": 10 }
   ],
-  "searchKeyword": "Exact canonical Wikipedia article title for this location/landform (e.g. 'Amazon rainforest', 'Ladakh', 'Sundarbans', 'Western Ghats', 'Great Rann of Kutch', 'Thar Desert', 'Spiti Valley')",
-  "errorMessage": "Helpful error message if the input is not a recognized biome, otherwise empty string"
+  "searchKeyword": "Concise 1-4 word canonical Wikipedia article title (e.g. 'Western Ghats', 'Tibetan Plateau', 'Sundarbans')",
+  "errorMessage": ""
 }`;
 
     const parts: any[] = [{ text: prompt }];
@@ -264,17 +282,25 @@ Provide your response in JSON format with the following structure:
 
     const result = await generateContentWithRetry(parts);
 
+    // Sanitize searchKeyword to prevent long paragraph hallucinations from breaking image queries
+    let cleanKeyword = String(result?.searchKeyword || '').trim();
+    if (cleanKeyword.length > 50 || cleanKeyword.includes('.') || cleanKeyword.includes('\n')) {
+      cleanKeyword = String(textQuery || result?.biome || '').replace(/[,(].*/, '').trim();
+    }
+    if (result) {
+      result.searchKeyword = cleanKeyword;
+    }
+
     // Validate that the result is an actual physical landscape or biome
     const rawBiome = String(result?.biome || '').trim();
     const isInvalidBiome = !rawBiome || 
-      ['n/a', 'na', 'none', 'unknown', 'invalid', 'null', 'undefined', 'not applicable', 'not a biome', 'unidentified'].includes(rawBiome.toLowerCase()) ||
-      Boolean(result?.errorMessage && result.errorMessage.trim().length > 0);
+      ['n/a', 'na', 'none', 'unknown', 'invalid', 'null', 'undefined', 'not applicable', 'not a biome', 'unidentified'].includes(rawBiome.toLowerCase());
 
     if (isInvalidBiome) {
       result.biome = '';
-      result.errorMessage = result.errorMessage || 
+      result.errorMessage = result?.errorMessage || 
         (textQuery 
-          ? `"${textQuery}" could not be identified as a physical landscape or biome. Please enter a valid geographical biome (e.g., Western Ghats, Cold Desert of Ladakh, Amazon Rainforest, Thar Desert, or Sundarbans).`
+          ? `"${textQuery}" could not be identified as a geographical landscape or biome. Please enter a valid place, state, or biome (e.g., Maharashtra, Western Ghats, Ladakh, China, Amazon Rainforest, Thar Desert, or Sundarbans).`
           : "The uploaded image does not appear to show an outdoor natural landscape or biome. Please upload a clear photo of natural terrain, vegetation, or a landform.");
       result.images = [];
       result.climaticData = [];
@@ -382,7 +408,7 @@ async function startServer() {
   });
 }
 
-// Only listen directly when running standalone (not inside Vercel serverless runtime)
-if (!process.env.VERCEL) {
+// Only listen directly when running standalone (not inside Vercel/Netlify serverless runtime)
+if (!process.env.VERCEL && !process.env.NETLIFY) {
   startServer();
 }

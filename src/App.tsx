@@ -720,6 +720,30 @@ export default function App() {
             </div>
           )}
 
+          {/* Operational & Analysis Error Banner */}
+          <AnimatePresence>
+            {state.error && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="p-4 bg-[#FFDAD6] text-[#410002] rounded-2xl flex items-center justify-between gap-3 border border-[#BA1A1A]/30 shadow-xs"
+              >
+                <div className="flex items-center gap-3">
+                  <AlertCircle size={20} className="shrink-0 text-[#BA1A1A]" />
+                  <p className="text-sm font-medium">{state.error}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setState(prev => ({ ...prev, error: null }))}
+                  className="px-2 py-1 text-xs font-bold text-[#BA1A1A] hover:bg-[#FFDAD6]/80 rounded-lg transition-colors"
+                >
+                  Dismiss
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Hero Section */}
           <div className="text-center space-y-3">
             <h2 className="text-3xl md:text-5xl font-black tracking-tight text-[#1D1B16]">

@@ -176,7 +176,7 @@ export const CURATED_BIOMES: CuratedBiomeEntry[] = [
   {
     id: 'westernghats',
     canonicalName: 'Western Ghats Shola & Montane Forest',
-    aliases: ['western ghats', 'shola', 'shola forest', 'sahyadri', 'nilgiri', 'nilgiris', 'anamudi', 'munnar', 'wayanad', 'kudremukh', 'silent valley', 'agumbe'],
+    aliases: ['western ghats', 'maharashtra', 'maharashtra ghats', 'shola', 'shola forest', 'sahyadri', 'nilgiri', 'nilgiris', 'anamudi', 'munnar', 'wayanad', 'kudremukh', 'silent valley', 'agumbe'],
     isIndiaLandscape: true,
     biomeType: 'Tropical Montane Evergreen & Shola Grassland',
     visualMarkers: [
@@ -615,6 +615,52 @@ export const CURATED_BIOMES: CuratedBiomeEntry[] = [
         url: 'https://images.unsplash.com/photo-1547471080-7cc2caa01a7e?auto=format&fit=crop&w=1600&q=80',
         title: 'Rolling Savanna Grassland at Dawn',
         caption: 'Seasonal grassland ecosystem supporting the world largest terrestrial mammal migration.'
+      }
+    ]
+  },
+  {
+    id: 'tibetan_plateau',
+    canonicalName: 'Tibetan Plateau & Himalayan Alpine Steppe',
+    aliases: ['china', 'tibet', 'tibetan plateau', 'plateau of tibet', 'roof of the world', 'qinghai', 'himalayan steppe', 'gobi'],
+    isIndiaLandscape: false,
+    biomeType: 'Montane Grasslands and Shrublands',
+    visualMarkers: [
+      'Vast high-altitude permafrost steppe bordered by snow-capped Himalayan massifs',
+      'Turquoise glacial and endorheic lakes (Namtso, Yamdrok, Qinghai Lake)',
+      'Sparse alpine cushion flora, Stipa needle grasses, and yak grazing pasture',
+      'Deep river headwaters feeding the Yangtze, Yellow, and Mekong rivers'
+    ],
+    geographicContext: 'Spanning nearly 2.5 million square kilometers with an average elevation exceeding 4,500 meters, the Tibetan Plateau is the world\'s highest and largest plateau. Known as the "Third Pole", it acts as a primary heat and moisture engine driving the Asian summer monsoons.',
+    environmentalStatus: 'Critically threatened by permafrost thaw, accelerated glacial melt, desertification, and downstream hydrological vulnerability across Asia.',
+    climaticData: [
+      { month: 'Jan', tempLow: -14, tempHigh: -1, precipitation: 2 },
+      { month: 'Feb', tempLow: -11, tempHigh: 2, precipitation: 4 },
+      { month: 'Mar', tempLow: -7, tempHigh: 6, precipitation: 8 },
+      { month: 'Apr', tempLow: -2, tempHigh: 11, precipitation: 15 },
+      { month: 'May', tempLow: 3, tempHigh: 16, precipitation: 35 },
+      { month: 'Jun', tempLow: 7, tempHigh: 20, precipitation: 75 },
+      { month: 'Jul', tempLow: 9, tempHigh: 21, precipitation: 125 },
+      { month: 'Aug', tempLow: 8, tempHigh: 20, precipitation: 115 },
+      { month: 'Sep', tempLow: 5, tempHigh: 17, precipitation: 60 },
+      { month: 'Oct', tempLow: -1, tempHigh: 12, precipitation: 12 },
+      { month: 'Nov', tempLow: -8, tempHigh: 5, precipitation: 3 },
+      { month: 'Dec', tempLow: -13, tempHigh: 1, precipitation: 1 }
+    ],
+    photos: [
+      {
+        url: 'https://images.unsplash.com/photo-1544644181-1484b3fdfc62?auto=format&fit=crop&w=1600&q=80',
+        title: 'Tibetan Plateau & Sacred Glacial Lake',
+        caption: 'High-elevation turquoise glacial lake resting below snow-capped peaks on the Tibetan plateau.'
+      },
+      {
+        url: 'https://images.unsplash.com/photo-1506197603052-3cc9c3a201bd?auto=format&fit=crop&w=1600&q=80',
+        title: 'Alpine Steppe & Permafrost Basin',
+        caption: 'Endless high-altitude grassland plains surrounded by the vast Trans-Himalayan escarpments.'
+      },
+      {
+        url: 'https://images.unsplash.com/photo-1518495973542-4542c06a5843?auto=format&fit=crop&w=1600&q=80',
+        title: 'South China Karst Mountain Pinnacles',
+        caption: 'Towering limestone karst pillars draped in subtropical evergreen flora in Southern China.'
       }
     ]
   }
