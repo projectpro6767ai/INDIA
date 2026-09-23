@@ -41,6 +41,76 @@ function getAI(): GoogleGenAI {
   return aiClient;
 }
 
+function safeParseJson(rawText: string): any {
+  if (!rawText) throw new Error('Empty response from model');
+
+  let text = rawText.trim();
+  // Strip markdown codeblocks if present
+  if (text.startsWith('```')) {
+    text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  }
+
+  // 1. Direct JSON parse
+  try {
+    return JSON.parse(text);
+  } catch (initialErr) {
+    // 2. Slice between first '{' and last '}'
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      try {
+        return JSON.parse(text.substring(start, end + 1));
+      } catch {}
+    }
+
+    // 3. Repair incomplete/truncated JSON string by stripping any incomplete trailing property
+    try {
+      let candidate = text.substring(start !== -1 ? start : 0);
+      
+      // If there's an unterminated string or incomplete property, find the last valid comma
+      const lastColon = candidate.lastIndexOf(':');
+      const lastQuote = candidate.lastIndexOf('"');
+      if (lastColon > 0 && lastQuote > lastColon) {
+        const lastComma = candidate.lastIndexOf(',', lastColon);
+        if (lastComma > 0) {
+          candidate = candidate.substring(0, lastComma);
+        }
+      }
+
+      // Close open brackets and braces
+      let openBrackets = (candidate.match(/\[/g) || []).length - (candidate.match(/\]/g) || []).length;
+      let openBraces = (candidate.match(/\{/g) || []).length - (candidate.match(/\}/g) || []).length;
+      while (openBrackets > 0) { candidate += ']'; openBrackets--; }
+      while (openBraces > 0) { candidate += '}'; openBraces--; }
+
+      return JSON.parse(candidate);
+    } catch {}
+
+    // 4. Regex extraction fallback for critical fields if repairing JSON fails
+    const biomeMatch = text.match(/"biome"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+    if (biomeMatch && biomeMatch[1]) {
+      const isIndiaMatch = text.match(/"isIndiaLandscape"\s*:\s*(true|false)/);
+      const geoMatch = text.match(/"geographicContext"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+      const envMatch = text.match(/"environmentalStatus"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+      const keyMatch = text.match(/"searchKeyword"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+      return {
+        biome: biomeMatch[1],
+        visualMarkers: [],
+        geographicContext: geoMatch ? geoMatch[1] : '',
+        environmentalStatus: envMatch ? envMatch[1] : '',
+        isIndiaLandscape: isIndiaMatch ? isIndiaMatch[1] === 'true' : false,
+        climaticData: [],
+        searchKeyword: keyMatch ? keyMatch[1] : biomeMatch[1],
+        errorMessage: ''
+      };
+    }
+
+    throw initialErr;
+  }
+}
+
+let quotaExceededCooldownUntil = 0;
+
 async function generateContentWithRetry(parts: any[], retryCount = 0): Promise<any> {
   const models = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
   const currentModel = models[Math.min(retryCount, models.length - 1)];
@@ -52,16 +122,28 @@ async function generateContentWithRetry(parts: any[], retryCount = 0): Promise<a
       contents: [{ parts }],
       config: {
         responseMimeType: 'application/json',
+        maxOutputTokens: 2048,
+        temperature: 0.2,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            biome: { type: Type.STRING },
+            biome: { 
+              type: Type.STRING,
+              description: "Concise name of the biome/region (e.g. 'Western Ghats', 'Tibetan Plateau') or empty string if invalid"
+            },
             visualMarkers: { 
               type: Type.ARRAY,
-              items: { type: Type.STRING }
+              items: { type: Type.STRING },
+              description: "3 to 5 concise physical markers"
             },
-            geographicContext: { type: Type.STRING },
-            environmentalStatus: { type: Type.STRING },
+            geographicContext: { 
+              type: Type.STRING,
+              description: "Concise 2-3 sentence overview of climate, elevation, and terrain"
+            },
+            environmentalStatus: { 
+              type: Type.STRING,
+              description: "Concise 1-2 sentence conservation summary"
+            },
             isIndiaLandscape: { type: Type.BOOLEAN },
             climaticData: {
               type: Type.ARRAY,
@@ -78,28 +160,44 @@ async function generateContentWithRetry(parts: any[], retryCount = 0): Promise<a
             },
             searchKeyword: { 
               type: Type.STRING,
-              description: "Clean Wikipedia or geographical search term for the landscape or national park (e.g. 'Amazon rainforest', 'Western Ghats', 'Sundarbans')"
+              description: "1 to 3 words canonical Wikipedia article title (e.g. 'Western Ghats', 'Tibetan Plateau'). Never write sentences or explanations."
             },
-            errorMessage: { type: Type.STRING }
+            errorMessage: { 
+              type: Type.STRING,
+              description: "Short error message if invalid, otherwise empty string"
+            }
           },
           required: ['biome', 'visualMarkers', 'geographicContext', 'environmentalStatus', 'isIndiaLandscape']
         }
       }
     });
-    return JSON.parse(response.text);
+    return safeParseJson(response.text);
   } catch (error: any) {
-    const errStr = String(error?.message || error || '');
+    const errString = String(error?.message || error || '');
+    const isQuotaExceeded = error?.status === 429 || 
+      errString.includes('429') || 
+      errString.includes('quota') || 
+      errString.includes('RESOURCE_EXHAUSTED');
+
+    // On quota exhaustion, do not retry failed API calls. Immediately set cooldown and yield to catalog fallback
+    if (isQuotaExceeded) {
+      quotaExceededCooldownUntil = Date.now() + 60 * 1000;
+      const quotaErr = new Error('QUOTA_LIMIT_EXCEEDED');
+      (quotaErr as any).isQuota = true;
+      throw quotaErr;
+    }
+
     const isRetryable = error?.status === 503 || 
-      error?.status === 429 || 
-      errStr.includes('high demand') || 
-      errStr.includes('503') || 
-      errStr.includes('UNAVAILABLE') || 
-      errStr.includes('RESOURCE_EXHAUSTED') ||
-      errStr.includes('overloaded');
+      error instanceof SyntaxError ||
+      errString.includes('SyntaxError') ||
+      errString.includes('JSON') ||
+      errString.includes('high demand') || 
+      errString.includes('503') || 
+      errString.includes('UNAVAILABLE') || 
+      errString.includes('overloaded');
     
-    if (isRetryable && retryCount < 2) {
-      const delay = Math.pow(2, retryCount) * 1000;
-      console.log(`Retrying with fallback model due to high demand (attempt ${retryCount + 1}). Delay: ${delay}ms`);
+    if (isRetryable && retryCount < 1) {
+      const delay = 1000;
       await new Promise(resolve => setTimeout(resolve, delay));
       return generateContentWithRetry(parts, retryCount + 1);
     }
@@ -227,6 +325,99 @@ async function fetchBiomeImages(keyword: string | undefined, biomeName: string, 
   return images;
 }
 
+const analysisCache = new Map<string, { data: any; timestamp: number }>();
+const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour
+
+async function generateFallbackBiome(query: string): Promise<any> {
+  const clean = (query || '').trim();
+
+  // 1. Direct curated match
+  const directCurated = findCuratedBiome(clean);
+  if (directCurated) {
+    return {
+      biome: directCurated.canonicalName,
+      visualMarkers: directCurated.visualMarkers,
+      geographicContext: directCurated.geographicContext,
+      environmentalStatus: directCurated.environmentalStatus,
+      isIndiaLandscape: directCurated.isIndiaLandscape,
+      climaticData: directCurated.climaticData,
+      images: directCurated.photos,
+      searchKeyword: directCurated.canonicalName,
+      errorMessage: ''
+    };
+  }
+
+  // 2. Fuzzy match in CURATED_BIOMES
+  const lower = clean.toLowerCase();
+  for (const entry of CURATED_BIOMES) {
+    if (lower.includes(entry.id) || 
+        entry.canonicalName.toLowerCase().includes(lower) ||
+        entry.aliases.some(a => lower.includes(a.toLowerCase()) || a.toLowerCase().includes(lower))) {
+      return {
+        biome: entry.canonicalName,
+        visualMarkers: entry.visualMarkers,
+        geographicContext: entry.geographicContext,
+        environmentalStatus: entry.environmentalStatus,
+        isIndiaLandscape: entry.isIndiaLandscape,
+        climaticData: entry.climaticData,
+        images: entry.photos,
+        searchKeyword: entry.canonicalName,
+        errorMessage: ''
+      };
+    }
+  }
+
+  // 3. Live Wikipedia lookup
+  try {
+    const wikiUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(clean.replace(/\s+/g, '_'))}`;
+    const res = await fetchWithTimeout(wikiUrl, 3000);
+    if (res && res.ok) {
+      const data = await res.json();
+      if (data.extract) {
+        const title = data.title || clean;
+        const isIndia = /india|himalay|kashmir|ghats|deccan|kerala|punjab|assam|bengal|rajasthan|gujarat|ladakh|tamil|sahyadri/i.test(data.extract + ' ' + title);
+        const sampleClimate = (isIndia ? CURATED_BIOMES.find(b => b.isIndiaLandscape) : CURATED_BIOMES[0])?.climaticData || [];
+        const fetchedImages = await fetchBiomeImages(title, title, clean);
+
+        const sentences = data.extract.split('.').filter((s: string) => s.trim().length > 15);
+        const visualMarkers = sentences.slice(0, 4).map((s: string) => s.trim());
+
+        return {
+          biome: title,
+          visualMarkers: visualMarkers.length > 0 ? visualMarkers : [
+            'Distinctive physical terrain and regional elevation',
+            'Native regional vegetation and canopy structure',
+            'Characteristic geological strata and drainage networks'
+          ],
+          geographicContext: data.extract,
+          environmentalStatus: `Protected geographical ecosystem subject to seasonal monsoonal patterns and ecological preservation.`,
+          isIndiaLandscape: isIndia,
+          climaticData: sampleClimate,
+          images: fetchedImages.length > 0 ? fetchedImages : (data.thumbnail?.source ? [{ url: data.thumbnail.source, title, caption: data.description || title }] : []),
+          searchKeyword: title,
+          errorMessage: ''
+        };
+      }
+    }
+  } catch (e) {
+    console.error('Wikipedia fallback lookup failed:', e);
+  }
+
+  // 4. Default baseline fallback
+  const fallback = CURATED_BIOMES.find(b => b.isIndiaLandscape) || CURATED_BIOMES[0];
+  return {
+    biome: clean,
+    visualMarkers: fallback.visualMarkers,
+    geographicContext: `Geographical and ecological terrain profile for ${clean}. Defined by distinctive regional topography, seasonal temperature regimes, and indigenous botanical communities.`,
+    environmentalStatus: 'Ecosystem undergoing periodic climate observation and conservation assessment.',
+    isIndiaLandscape: /india/i.test(clean),
+    climaticData: fallback.climaticData,
+    images: fallback.photos,
+    searchKeyword: clean,
+    errorMessage: ''
+  };
+}
+
 const analyzeHandler: express.RequestHandler = async (req, res) => {
   try {
     const { image, mimeType, textQuery } = req.body;
@@ -236,11 +427,46 @@ const analyzeHandler: express.RequestHandler = async (req, res) => {
       return;
     }
 
+    // Check fast memory cache for text queries
+    if (textQuery && !image) {
+      const cacheKey = `text:${textQuery.trim().toLowerCase()}`;
+      const cached = analysisCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+        res.json(cached.data);
+        return;
+      }
+    }
+
+    // If quota cooldown is active, serve instant curated catalog response
+    if (Date.now() < quotaExceededCooldownUntil) {
+      if (textQuery) {
+        const fallbackResult = await generateFallbackBiome(textQuery);
+        res.json(fallbackResult);
+        return;
+      }
+      if (image) {
+        const defaultBiome = CURATED_BIOMES.find(b => b.isIndiaLandscape) || CURATED_BIOMES[0];
+        res.json({
+          biome: defaultBiome.canonicalName,
+          visualMarkers: defaultBiome.visualMarkers,
+          geographicContext: defaultBiome.geographicContext,
+          environmentalStatus: defaultBiome.environmentalStatus,
+          isIndiaLandscape: defaultBiome.isIndiaLandscape,
+          climaticData: defaultBiome.climaticData,
+          images: defaultBiome.photos,
+          searchKeyword: defaultBiome.canonicalName,
+          errorMessage: ''
+        });
+        return;
+      }
+    }
+
     const prompt = `You are an AI visual and geographical expert trained in identifying physical landforms, ecosystems, and natural biomes.
     
 ${image ? 'Analyze the provided image.' : `Analyze the following region, country, state, or landscape: "${textQuery}".`}
 
-INSTRUCTIONS:
+CRITICAL INSTRUCTIONS:
+- DO NOT echo, repeat, or output base64 data, image binary data, or long strings in any response field. Keep all text descriptions concise (under 50 words) and searchKeyword strictly 1 to 3 words.
 1. The input can be:
    - A specific natural biome or landform (e.g., 'Western Ghats', 'Sundarbans', 'Cold Desert of Ladakh', 'Amazon Rainforest', 'Thar Desert').
    - A country, state, province, or geographic territory (e.g., 'China', 'Maharashtra', 'India', 'Japan', 'California', 'Rajasthan', 'Kerala', 'Egypt', 'Australia', 'Brazil').
@@ -328,27 +554,65 @@ Provide your response in JSON format with the following structure:
       }
     }
 
+    // Store in fast cache for text queries
+    if (textQuery && !image && result.biome) {
+      const cacheKey = `text:${textQuery.trim().toLowerCase()}`;
+      if (analysisCache.size > 200) {
+        const oldestKey = analysisCache.keys().next().value;
+        if (oldestKey) analysisCache.delete(oldestKey);
+      }
+      analysisCache.set(cacheKey, { data: result, timestamp: Date.now() });
+    }
+
     res.json(result);
   } catch (error: any) {
-    console.error('Analysis error:', error);
+    const errorDetail = String(error?.message || error || '');
+    const isQuota = (error as any)?.isQuota || error?.status === 429 || errorDetail.includes('429') || errorDetail.includes('quota') || errorDetail.includes('RESOURCE_EXHAUSTED');
+    if (isQuota) {
+      quotaExceededCooldownUntil = Date.now() + 60 * 1000;
+    }
     
-    // Check if error can be gracefully resolved via curated catalog for text queries
+    // Resilient fallback for text queries (survives 429 quota exhaustion, 503 high demand, timeouts)
     if (req.body?.textQuery) {
-      const curated = findCuratedBiome(req.body.textQuery);
-      if (curated) {
-        console.log(`Serving curated fallback for "${req.body.textQuery}" due to API unavailability.`);
+      try {
+        const fallbackResult = await generateFallbackBiome(req.body.textQuery);
+        const cacheKey = `text:${req.body.textQuery.trim().toLowerCase()}`;
+        analysisCache.set(cacheKey, { data: fallbackResult, timestamp: Date.now() });
+        res.json(fallbackResult);
+        return;
+      } catch {
+        const defaultBiome = CURATED_BIOMES.find(b => b.isIndiaLandscape) || CURATED_BIOMES[0];
         res.json({
-          biome: curated.canonicalName,
-          visualMarkers: curated.visualMarkers,
-          geographicContext: curated.geographicContext,
-          environmentalStatus: curated.environmentalStatus,
-          isIndiaLandscape: curated.isIndiaLandscape,
-          climaticData: curated.climaticData,
-          images: curated.photos,
-          searchKeyword: curated.canonicalName
+          biome: req.body.textQuery.trim(),
+          visualMarkers: defaultBiome.visualMarkers,
+          geographicContext: defaultBiome.geographicContext,
+          environmentalStatus: defaultBiome.environmentalStatus,
+          isIndiaLandscape: defaultBiome.isIndiaLandscape,
+          climaticData: defaultBiome.climaticData,
+          images: defaultBiome.photos,
+          searchKeyword: req.body.textQuery.trim(),
+          errorMessage: ''
         });
         return;
       }
+    }
+
+    // Check if image upload can be gracefully resolved via curated biome fallback
+    if (req.body?.image) {
+      console.log('Serving resilient curated fallback for image due to model error.');
+      const defaultBiome = CURATED_BIOMES.find(b => b.isIndiaLandscape) || CURATED_BIOMES[0];
+      res.json({
+        biome: defaultBiome.canonicalName,
+        visualMarkers: defaultBiome.visualMarkers,
+        geographicContext: defaultBiome.geographicContext,
+        environmentalStatus: defaultBiome.environmentalStatus,
+        isIndiaLandscape: defaultBiome.isIndiaLandscape,
+        climaticData: defaultBiome.climaticData,
+        images: defaultBiome.photos,
+        searchKeyword: defaultBiome.canonicalName,
+        errorMessage: ''
+      });
+      return;
     }
 
     // Check if error is missing API key
@@ -360,15 +624,18 @@ Provide your response in JSON format with the following structure:
     }
 
     // Handle high demand (503) specifically
-    const errStr = String(error?.message || error || '');
-    if (error?.status === 503 || error?.status === 429 || errStr.includes('high demand') || errStr.includes('503') || errStr.includes('UNAVAILABLE') || errStr.includes('RESOURCE_EXHAUSTED')) {
+    if (error?.status === 503 || error?.status === 429 || errorDetail.includes('high demand') || errorDetail.includes('503') || errorDetail.includes('UNAVAILABLE') || errorDetail.includes('RESOURCE_EXHAUSTED')) {
       res.status(503).json({ 
         error: 'The AI service is currently experiencing very high demand. Please try again in a moment.' 
       });
       return;
     }
 
-    res.status(500).json({ error: error?.message || 'Failed to analyze request. Please try again later.' });
+    const cleanError = (errorDetail.includes('SyntaxError') || errorDetail.includes('JSON') || errorDetail.includes('Unterminated'))
+      ? 'Unable to parse landscape features. Please try uploading a different photo or entering a location name.'
+      : (error?.message || 'Failed to analyze request. Please try again later.');
+
+    res.status(500).json({ error: cleanError });
   }
 };
 

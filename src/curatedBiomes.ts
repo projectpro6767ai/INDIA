@@ -670,12 +670,26 @@ export function findCuratedBiome(query?: string, biomeName?: string): CuratedBio
   const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
   const searchTerms = [query, biomeName].filter((t): t is string => Boolean(t && t.trim().length > 1));
 
+  // 1. Exact or substring match across canonical name and aliases
   for (const term of searchTerms) {
     const clean = normalize(term);
     for (const entry of CURATED_BIOMES) {
       if (clean === normalize(entry.canonicalName)) return entry;
       if (entry.aliases.some(alias => clean.includes(normalize(alias)) || normalize(alias).includes(clean))) {
         return entry;
+      }
+    }
+  }
+
+  // 2. Token-level matching (e.g. "rainforest", "desert", "shola", "mangroves", "wetlands", "grasslands", "himalayas", "mountains", "plateau", "tundra", "savanna")
+  const stopWords = new Set(['the', 'and', 'of', 'in', 'a', 'an', 'at', 'to', 'for', 'is', 'on', 'with', 'by']);
+  for (const term of searchTerms) {
+    const tokens = normalize(term).split(/\s+/).filter(t => t.length > 2 && !stopWords.has(t));
+    for (const token of tokens) {
+      for (const entry of CURATED_BIOMES) {
+        if (normalize(entry.canonicalName).split(/\s+/).includes(token)) return entry;
+        if (normalize(entry.biomeType).split(/\s+/).includes(token)) return entry;
+        if (entry.aliases.some(alias => normalize(alias).split(/\s+/).includes(token))) return entry;
       }
     }
   }
