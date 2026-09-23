@@ -16,7 +16,6 @@ import {
   getFirestore, 
   collection, 
   doc, 
-  getDocFromServer, 
   setDoc, 
   deleteDoc, 
   onSnapshot, 
@@ -49,18 +48,6 @@ export const db = getFirestore(
 
 // Initialize Firebase Authentication
 export const auth = getAuth(app);
-
-// Test connection on boot
-async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration.");
-    }
-  }
-}
-testConnection();
 
 // Operation Types for error diagnosis
 export enum OperationType {

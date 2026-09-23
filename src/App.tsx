@@ -31,6 +31,8 @@ import {
   Database
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import ClimaticChart from './components/ClimaticChart';
+import { findCuratedBiome } from './curatedBiomes';
 import type { AnalysisState, AnalysisResult } from './types';
 import { 
   auth, 
@@ -50,8 +52,14 @@ const POPULAR_BIOMES = [
   { name: 'Cold Desert of Ladakh', tag: 'High-Altitude' },
   { name: 'Sundarbans Mangroves', tag: 'Tidal Delta' },
   { name: 'Western Ghats Shola', tag: 'Montane Forest' },
-  { name: 'Great Rann of Kutch', tag: 'Salt Marsh' },
-  { name: 'Thar Desert Dunes', tag: 'Arid Sand' },
+  { name: 'Great Rann of Kutch', tag: 'White Salt Desert' },
+  { name: 'Thar Desert Dunes', tag: 'Arid Sand Dunes' },
+  { name: 'Spiti Valley', tag: 'Trans-Himalayan' },
+  { name: 'Kaziranga Grasslands', tag: 'Alluvial Savanna' },
+  { name: 'Valley of Flowers', tag: 'Alpine Meadow' },
+  { name: 'Sahara Desert', tag: 'Erg Sand Sea' },
+  { name: 'Serengeti Savanna', tag: 'Acacia Plain' },
+  { name: 'Taiga Boreal Forest', tag: 'Subarctic Conifer' },
 ];
 
 export default function App() {
@@ -119,6 +127,14 @@ export default function App() {
       }
 
       if (
+        err?.code === 'auth/unauthorized-domain' ||
+        err?.message?.includes('unauthorized-domain')
+      ) {
+        setAuthError('Domain Authorization Required: Add your Vercel domain to Firebase Console > Authentication > Settings > Authorized domains.');
+        return;
+      }
+
+      if (
         err?.code === 'auth/popup-blocked' ||
         err?.message?.includes('popup-blocked')
       ) {
@@ -162,11 +178,33 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Failed to analyze region');
+        let errMsg = 'Failed to analyze region';
+        try {
+          const errorData = await response.json();
+          if (errorData.error) errMsg = errorData.error;
+        } catch {
+          if (response.status === 404) {
+            errMsg = 'API route not found (404). Ensure Vercel serverless functions are deployed.';
+          } else {
+            errMsg = `Server returned status ${response.status}. Please check Vercel function logs.`;
+          }
+        }
+        throw new Error(errMsg);
       }
 
       const result: AnalysisResult = await response.json();
+      
+      // Client-side fallback enrichment if climaticData or images are missing
+      const curatedMatch = findCuratedBiome(query, result?.biome);
+      if (curatedMatch) {
+        if (!result.climaticData || result.climaticData.length === 0) {
+          result.climaticData = curatedMatch.climaticData;
+        }
+        if (!result.images || result.images.length === 0) {
+          result.images = curatedMatch.photos;
+        }
+      }
+
       if (result.biome) {
         logAnalyticsEvent('biome_identified', { 
           biome: result.biome, 
@@ -177,6 +215,28 @@ export default function App() {
       setState(prev => ({ ...prev, result, loading: false }));
     } catch (err: any) {
       logAnalyticsEvent('search_error', { error: err.message });
+      
+      // Client-side instant offline/resilience fallback for curated biomes
+      const offlineCurated = findCuratedBiome(query);
+      if (offlineCurated) {
+        setState(prev => ({
+          ...prev,
+          loading: false,
+          error: null,
+          result: {
+            biome: offlineCurated.canonicalName,
+            isIndiaLandscape: offlineCurated.isIndiaLandscape,
+            visualMarkers: offlineCurated.visualMarkers,
+            geographicContext: offlineCurated.geographicContext,
+            environmentalStatus: offlineCurated.environmentalStatus,
+            climaticData: offlineCurated.climaticData,
+            images: offlineCurated.photos,
+          },
+          imagePreview: null,
+        }));
+        return;
+      }
+
       setState(prev => ({ 
         ...prev, 
         error: err.message || 'Analysis failed. Please try again.', 
@@ -231,11 +291,30 @@ export default function App() {
         });
 
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || 'Failed to analyze image');
+          let errMsg = 'Failed to analyze image';
+          try {
+            const errorData = await response.json();
+            if (errorData.error) errMsg = errorData.error;
+          } catch {
+            if (response.status === 404) {
+              errMsg = 'API route not found (404). Ensure Vercel serverless functions are deployed.';
+            } else {
+              errMsg = `Server returned status ${response.status}. Please check Vercel function logs.`;
+            }
+          }
+          throw new Error(errMsg);
         }
 
         const result: AnalysisResult = await response.json();
+
+        // Enrich climaticData from curated catalog if missing
+        if (result && result.biome && (!result.climaticData || result.climaticData.length === 0)) {
+          const curatedMatch = findCuratedBiome(undefined, result.biome);
+          if (curatedMatch && curatedMatch.climaticData) {
+            result.climaticData = curatedMatch.climaticData;
+          }
+        }
+
         if (result.biome) {
           logAnalyticsEvent('biome_identified_from_image', { 
             biome: result.biome, 
@@ -293,6 +372,7 @@ export default function App() {
   };
 
   const loadSavedBiome = (saved: SavedBiomeDoc) => {
+    const curatedMatch = findCuratedBiome(saved.biomeName, saved.biomeName);
     setState({
       loading: false,
       error: null,
@@ -302,7 +382,8 @@ export default function App() {
         visualMarkers: saved.visualMarkers,
         geographicContext: saved.geographicContext,
         environmentalStatus: saved.environmentalStatus,
-        images: saved.imageUrl ? [{ url: saved.imageUrl, title: saved.biomeName }] : [],
+        climaticData: curatedMatch?.climaticData,
+        images: saved.imageUrl ? [{ url: saved.imageUrl, title: saved.biomeName }] : (curatedMatch?.photos || []),
       },
       imagePreview: saved.imageUrl || null,
     });
@@ -913,6 +994,9 @@ export default function App() {
                             <p className="text-sm text-[#494631] leading-relaxed">
                               {state.result.geographicContext}
                             </p>
+                            {state.result.climaticData && (
+                              <ClimaticChart data={state.result.climaticData} />
+                            )}
                           </div>
 
                           {/* Environmental & Conservation Status */}
