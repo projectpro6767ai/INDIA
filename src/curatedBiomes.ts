@@ -621,7 +621,7 @@ export const CURATED_BIOMES: CuratedBiomeEntry[] = [
   {
     id: 'tibetan_plateau',
     canonicalName: 'Tibetan Plateau & Himalayan Alpine Steppe',
-    aliases: ['china', 'tibet', 'tibetan plateau', 'plateau of tibet', 'roof of the world', 'qinghai', 'himalayan steppe', 'gobi'],
+    aliases: ['china', 'tibet', 'tibetan plateau', 'plateau of tibet', 'roof of the world', 'qinghai', 'himalayan steppe', 'gobi', 'south china', 'chinese landscape', 'yunnan'],
     isIndiaLandscape: false,
     biomeType: 'Montane Grasslands and Shrublands',
     visualMarkers: [
@@ -667,22 +667,45 @@ export const CURATED_BIOMES: CuratedBiomeEntry[] = [
 ];
 
 export function findCuratedBiome(query?: string, biomeName?: string): CuratedBiomeEntry | null {
+  if (!query && !biomeName) return null;
   const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
-  const searchTerms = [query, biomeName].filter((t): t is string => Boolean(t && t.trim().length > 1));
+
+  // If query contains comma or "or", test individual segments first (e.g. "china,or Maharashtra" -> "china", "maharashtra")
+  const rawTerms: string[] = [];
+  if (query) {
+    const segments = query.split(/[,;/]|(?:\s+or\s+)|\+/).map(s => s.trim()).filter(s => s.length > 1);
+    rawTerms.push(...segments);
+    rawTerms.push(query.trim());
+  }
+  if (biomeName) {
+    rawTerms.push(biomeName.trim());
+  }
+
+  const searchTerms = rawTerms.filter((t): t is string => Boolean(t && t.length > 1));
 
   // 1. Exact or substring match across canonical name and aliases
   for (const term of searchTerms) {
     const clean = normalize(term);
     for (const entry of CURATED_BIOMES) {
       if (clean === normalize(entry.canonicalName)) return entry;
-      if (entry.aliases.some(alias => clean.includes(normalize(alias)) || normalize(alias).includes(clean))) {
+      if (entry.aliases.some(alias => clean === normalize(alias))) return entry;
+    }
+  }
+
+  for (const term of searchTerms) {
+    const clean = normalize(term);
+    for (const entry of CURATED_BIOMES) {
+      if (entry.aliases.some(alias => {
+        const normAlias = normalize(alias);
+        return clean.includes(normAlias) || (clean.length > 3 && normAlias.includes(clean));
+      })) {
         return entry;
       }
     }
   }
 
-  // 2. Token-level matching (e.g. "rainforest", "desert", "shola", "mangroves", "wetlands", "grasslands", "himalayas", "mountains", "plateau", "tundra", "savanna")
-  const stopWords = new Set(['the', 'and', 'of', 'in', 'a', 'an', 'at', 'to', 'for', 'is', 'on', 'with', 'by']);
+  // 2. Token-level matching
+  const stopWords = new Set(['the', 'and', 'of', 'in', 'a', 'an', 'at', 'to', 'for', 'is', 'on', 'with', 'by', 'or']);
   for (const term of searchTerms) {
     const tokens = normalize(term).split(/\s+/).filter(t => t.length > 2 && !stopWords.has(t));
     for (const token of tokens) {
@@ -695,4 +718,54 @@ export function findCuratedBiome(query?: string, biomeName?: string): CuratedBio
   }
 
   return null;
+}
+
+export function searchCuratedBiomes(query: string, limit = 5): CuratedBiomeEntry[] {
+  if (!query || query.trim().length < 1) return [];
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+  const qClean = normalize(query);
+  const qTokens = qClean.split(/\s+/).filter(t => t.length > 1 && !['or', 'and', 'the', 'in', 'of', 'to'].includes(t));
+
+  const results: CuratedBiomeEntry[] = [];
+  const seenIds = new Set<string>();
+
+  // If query contains comma or "or", extract subparts as well
+  const subqueries = query.split(/[,;/]|(?:\s+or\s+)|\+/).map(s => normalize(s)).filter(s => s.length > 1);
+
+  // 1. Direct or alias match
+  for (const entry of CURATED_BIOMES) {
+    const entryName = normalize(entry.canonicalName);
+    const aliases = entry.aliases.map(a => normalize(a));
+
+    const directMatch = entryName.includes(qClean) || qClean.includes(entryName) ||
+      aliases.some(a => a.includes(qClean) || qClean.includes(a));
+
+    const subMatch = subqueries.some(sq => 
+      entryName.includes(sq) || sq.includes(entryName) || aliases.some(a => a.includes(sq) || sq.includes(a))
+    );
+
+    if (directMatch || subMatch) {
+      if (!seenIds.has(entry.id)) {
+        seenIds.add(entry.id);
+        results.push(entry);
+      }
+    }
+  }
+
+  // 2. Token-based match
+  for (const token of qTokens) {
+    for (const entry of CURATED_BIOMES) {
+      if (seenIds.has(entry.id)) continue;
+      const entryName = normalize(entry.canonicalName);
+      const biomeType = normalize(entry.biomeType);
+      const aliases = entry.aliases.map(a => normalize(a));
+
+      if (entryName.includes(token) || biomeType.includes(token) || aliases.some(a => a.includes(token))) {
+        seenIds.add(entry.id);
+        results.push(entry);
+      }
+    }
+  }
+
+  return results.slice(0, limit);
 }

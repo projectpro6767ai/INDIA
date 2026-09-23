@@ -109,100 +109,96 @@ function safeParseJson(rawText: string): any {
   }
 }
 
-let quotaExceededCooldownUntil = 0;
+const CANDIDATE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+const modelCooldownMap = new Map<string, number>();
 
-async function generateContentWithRetry(parts: any[], retryCount = 0): Promise<any> {
-  const models = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
-  const currentModel = models[Math.min(retryCount, models.length - 1)];
+async function generateContentWithRetry(parts: any[]): Promise<any> {
+  const ai = getAI();
 
-  try {
-    const ai = getAI();
-    const response = await ai.models.generateContent({
-      model: currentModel,
-      contents: [{ parts }],
-      config: {
-        responseMimeType: 'application/json',
-        maxOutputTokens: 2048,
-        temperature: 0.2,
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            biome: { 
-              type: Type.STRING,
-              description: "Concise name of the biome/region (e.g. 'Western Ghats', 'Tibetan Plateau') or empty string if invalid"
-            },
-            visualMarkers: { 
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "3 to 5 concise physical markers"
-            },
-            geographicContext: { 
-              type: Type.STRING,
-              description: "Concise 2-3 sentence overview of climate, elevation, and terrain"
-            },
-            environmentalStatus: { 
-              type: Type.STRING,
-              description: "Concise 1-2 sentence conservation summary"
-            },
-            isIndiaLandscape: { type: Type.BOOLEAN },
-            climaticData: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  month: { type: Type.STRING },
-                  tempLow: { type: Type.NUMBER, description: "Average monthly low temperature in Celsius" },
-                  tempHigh: { type: Type.NUMBER, description: "Average monthly high temperature in Celsius" },
-                  precipitation: { type: Type.NUMBER, description: "Average monthly precipitation in mm" }
-                },
-                required: ['month', 'tempLow', 'tempHigh', 'precipitation']
+  for (const currentModel of CANDIDATE_MODELS) {
+    const cooldown = modelCooldownMap.get(currentModel) || 0;
+    if (Date.now() < cooldown) {
+      continue;
+    }
+
+    try {
+      const response = await ai.models.generateContent({
+        model: currentModel,
+        contents: [{ parts }],
+        config: {
+          responseMimeType: 'application/json',
+          maxOutputTokens: 2048,
+          temperature: 0.2,
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              biome: { 
+                type: Type.STRING,
+                description: "Concise name of the biome/region (e.g. 'Western Ghats', 'Tibetan Plateau') or empty string if invalid"
+              },
+              visualMarkers: { 
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "3 to 5 concise physical markers"
+              },
+              geographicContext: { 
+                type: Type.STRING,
+                description: "Concise 2-3 sentence overview of climate, elevation, and terrain"
+              },
+              environmentalStatus: { 
+                type: Type.STRING,
+                description: "Concise 1-2 sentence conservation summary"
+              },
+              isIndiaLandscape: { type: Type.BOOLEAN },
+              climaticData: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    month: { type: Type.STRING },
+                    tempLow: { type: Type.NUMBER, description: "Average monthly low temperature in Celsius" },
+                    tempHigh: { type: Type.NUMBER, description: "Average monthly high temperature in Celsius" },
+                    precipitation: { type: Type.NUMBER, description: "Average monthly precipitation in mm" }
+                  },
+                  required: ['month', 'tempLow', 'tempHigh', 'precipitation']
+                }
+              },
+              searchKeyword: { 
+                type: Type.STRING,
+                description: "1 to 3 words canonical Wikipedia article title (e.g. 'Western Ghats', 'Tibetan Plateau'). Never write sentences or explanations."
+              },
+              errorMessage: { 
+                type: Type.STRING,
+                description: "Short error message if invalid, otherwise empty string"
               }
             },
-            searchKeyword: { 
-              type: Type.STRING,
-              description: "1 to 3 words canonical Wikipedia article title (e.g. 'Western Ghats', 'Tibetan Plateau'). Never write sentences or explanations."
-            },
-            errorMessage: { 
-              type: Type.STRING,
-              description: "Short error message if invalid, otherwise empty string"
-            }
-          },
-          required: ['biome', 'visualMarkers', 'geographicContext', 'environmentalStatus', 'isIndiaLandscape']
+            required: ['biome', 'visualMarkers', 'geographicContext', 'environmentalStatus', 'isIndiaLandscape']
+          }
         }
+      });
+
+      return safeParseJson(response.text);
+    } catch (error: any) {
+      const errString = String(error?.message || error || '');
+      const isQuotaExceeded = error?.status === 429 || 
+        errString.includes('429') || 
+        errString.includes('quota') || 
+        errString.includes('RESOURCE_EXHAUSTED');
+
+      if (isQuotaExceeded) {
+        // Cooldown this model for 30 minutes and try next available candidate
+        modelCooldownMap.set(currentModel, Date.now() + 30 * 60 * 1000);
+        continue;
       }
-    });
-    return safeParseJson(response.text);
-  } catch (error: any) {
-    const errString = String(error?.message || error || '');
-    const isQuotaExceeded = error?.status === 429 || 
-      errString.includes('429') || 
-      errString.includes('quota') || 
-      errString.includes('RESOURCE_EXHAUSTED');
 
-    // On quota exhaustion, do not retry failed API calls. Immediately set cooldown and yield to catalog fallback
-    if (isQuotaExceeded) {
-      quotaExceededCooldownUntil = Date.now() + 60 * 1000;
-      const quotaErr = new Error('QUOTA_LIMIT_EXCEEDED');
-      (quotaErr as any).isQuota = true;
-      throw quotaErr;
+      // If it's a 503 high demand or syntax/connection error, continue to alternate model
+      continue;
     }
-
-    const isRetryable = error?.status === 503 || 
-      error instanceof SyntaxError ||
-      errString.includes('SyntaxError') ||
-      errString.includes('JSON') ||
-      errString.includes('high demand') || 
-      errString.includes('503') || 
-      errString.includes('UNAVAILABLE') || 
-      errString.includes('overloaded');
-    
-    if (isRetryable && retryCount < 1) {
-      const delay = 1000;
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return generateContentWithRetry(parts, retryCount + 1);
-    }
-    throw error;
   }
+
+  const allExhausted = new Error('ALL_AI_MODELS_EXHAUSTED');
+  (allExhausted as any).isQuota = true;
+  throw allExhausted;
 }
 
 async function fetchWithTimeout(url: string, timeoutMs = 3500) {
@@ -329,10 +325,11 @@ const analysisCache = new Map<string, { data: any; timestamp: number }>();
 const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour
 
 async function generateFallbackBiome(query: string): Promise<any> {
-  const clean = (query || '').trim();
+  const raw = (query || '').trim();
+  const clean = raw.split(/[,;/]|(?:\s+or\s+)|\+/)[0].trim() || raw;
 
   // 1. Direct curated match
-  const directCurated = findCuratedBiome(clean);
+  const directCurated = findCuratedBiome(raw) || findCuratedBiome(clean);
   if (directCurated) {
     return {
       biome: directCurated.canonicalName,
@@ -375,7 +372,7 @@ async function generateFallbackBiome(query: string): Promise<any> {
       const data = await res.json();
       if (data.extract) {
         const title = data.title || clean;
-        const isIndia = /india|himalay|kashmir|ghats|deccan|kerala|punjab|assam|bengal|rajasthan|gujarat|ladakh|tamil|sahyadri/i.test(data.extract + ' ' + title);
+        const isIndia = /india|himalay|kashmir|ghats|deccan|kerala|punjab|assam|bengal|rajasthan|gujarat|ladakh|tamil|sahyadri|maharashtra/i.test(data.extract + ' ' + title);
         const sampleClimate = (isIndia ? CURATED_BIOMES.find(b => b.isIndiaLandscape) : CURATED_BIOMES[0])?.climaticData || [];
         const fetchedImages = await fetchBiomeImages(title, title, clean);
 
@@ -437,8 +434,9 @@ const analyzeHandler: express.RequestHandler = async (req, res) => {
       }
     }
 
-    // If quota cooldown is active, serve instant curated catalog response
-    if (Date.now() < quotaExceededCooldownUntil) {
+    // If all candidate AI models are in cooldown, immediately serve curated catalog response
+    const hasAvailableAiModel = CANDIDATE_MODELS.some(m => Date.now() >= (modelCooldownMap.get(m) || 0));
+    if (!hasAvailableAiModel) {
       if (textQuery) {
         const fallbackResult = await generateFallbackBiome(textQuery);
         res.json(fallbackResult);
@@ -569,7 +567,7 @@ Provide your response in JSON format with the following structure:
     const errorDetail = String(error?.message || error || '');
     const isQuota = (error as any)?.isQuota || error?.status === 429 || errorDetail.includes('429') || errorDetail.includes('quota') || errorDetail.includes('RESOURCE_EXHAUSTED');
     if (isQuota) {
-      quotaExceededCooldownUntil = Date.now() + 60 * 1000;
+      CANDIDATE_MODELS.forEach(m => modelCooldownMap.set(m, Date.now() + 15 * 60 * 1000));
     }
     
     // Resilient fallback for text queries (survives 429 quota exhaustion, 503 high demand, timeouts)

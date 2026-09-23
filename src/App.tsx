@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { 
   Upload, 
   Camera, 
@@ -32,7 +32,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ClimaticChart from './components/ClimaticChart';
-import { findCuratedBiome } from './curatedBiomes';
+import { findCuratedBiome, searchCuratedBiomes } from './curatedBiomes';
 import type { AnalysisState, AnalysisResult } from './types';
 import { 
   auth, 
@@ -70,6 +70,27 @@ export default function App() {
     imagePreview: null,
   });
   const [textInput, setTextInput] = useState('');
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [highlightedSuggestionIndex, setHighlightedSuggestionIndex] = useState(-1);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+
+  // Compute live search suggestions from curated biomes and aliases as user types
+  const suggestions = useMemo(() => {
+    return searchCuratedBiomes(textInput, 6);
+  }, [textInput]);
+
+  // Click outside to dismiss search suggestions
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
+        setShowSuggestions(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; title: string; caption?: string } | null>(null);
   const [selectedTab, setSelectedTab] = useState<'uploaded' | 'reference'>('reference');
@@ -158,17 +179,44 @@ export default function App() {
 
   const executeTextSearch = async (query: string) => {
     if (!query.trim()) return;
+    setShowSuggestions(false);
 
     logAnalyticsEvent('search_biome', { query });
     setActiveImageIndex(0);
     setSavingStatus('idle');
-    setState({
-      loading: true,
-      error: null,
-      result: null,
-      imagePreview: null,
-    });
     setSelectedTab('reference');
+
+    // Instant optimistic render if curated biome or alias matches
+    const instantCurated = findCuratedBiome(query);
+    if (instantCurated) {
+      setState({
+        loading: false,
+        error: null,
+        result: {
+          biome: instantCurated.canonicalName,
+          isIndiaLandscape: instantCurated.isIndiaLandscape,
+          visualMarkers: instantCurated.visualMarkers,
+          geographicContext: instantCurated.geographicContext,
+          environmentalStatus: instantCurated.environmentalStatus,
+          climaticData: instantCurated.climaticData,
+          images: instantCurated.photos,
+        },
+        imagePreview: null,
+      });
+      setTimeout(() => {
+        resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 50);
+    } else {
+      setState({
+        loading: true,
+        error: null,
+        result: null,
+        imagePreview: null,
+      });
+      setTimeout(() => {
+        resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 50);
+    }
 
     try {
       const response = await fetch('/api/analyze', {
@@ -229,10 +277,22 @@ export default function App() {
       const isInvalid = !rawBiome || 
         ['n/a', 'na', 'none', 'unknown', 'invalid', 'null', 'undefined', 'not applicable', 'unidentified'].includes(rawBiome.toLowerCase());
       if (isInvalid) {
-        result.biome = '';
-        result.errorMessage = result.errorMessage || `"${query}" is not recognized as a natural landscape or biome. Please enter a valid biome (e.g., Western Ghats, Amazon Rainforest, Cold Desert of Ladakh, Thar Desert, or Sundarbans).`;
-        result.images = [];
-        result.climaticData = [];
+        const fallbackCurated = findCuratedBiome(query);
+        if (fallbackCurated) {
+          result.biome = fallbackCurated.canonicalName;
+          result.visualMarkers = fallbackCurated.visualMarkers;
+          result.geographicContext = fallbackCurated.geographicContext;
+          result.environmentalStatus = fallbackCurated.environmentalStatus;
+          result.isIndiaLandscape = fallbackCurated.isIndiaLandscape;
+          result.climaticData = fallbackCurated.climaticData;
+          result.images = fallbackCurated.photos;
+          result.errorMessage = '';
+        } else {
+          result.biome = '';
+          result.errorMessage = result.errorMessage || `"${query}" is not recognized as a natural landscape or biome. Please enter a valid biome (e.g., Western Ghats, Amazon Rainforest, Cold Desert of Ladakh, Thar Desert, or Sundarbans).`;
+          result.images = [];
+          result.climaticData = [];
+        }
       } else {
         // Client-side fallback enrichment if climaticData or images are missing
         const curatedMatch = findCuratedBiome(query, result?.biome);
@@ -755,25 +815,142 @@ export default function App() {
           </div>
 
           {/* Search by Name / Text Query Input */}
-          <form onSubmit={handleTextSearch} className="relative max-w-2xl mx-auto">
-            <div className="relative flex items-center">
-              <input
-                type="text"
-                placeholder="Enter biome name (e.g., 'Amazon forest', 'Ladakh', 'Sundarbans')..."
-                value={textInput}
-                onChange={(e) => setTextInput(e.target.value)}
-                className="w-full pl-12 pr-28 py-4 bg-white border-2 border-[#E6E1D6] focus:border-[#4F6600] rounded-2xl shadow-sm text-base text-[#1D1B16] placeholder-[#797667] focus:outline-none transition-all"
-              />
-              <Search className="absolute left-4 text-[#797667]" size={20} />
-              <button
-                type="submit"
-                disabled={state.loading || !textInput.trim()}
-                className="absolute right-2.5 px-5 py-2.5 bg-[#4F6600] text-white font-bold rounded-xl hover:bg-[#3E5000] disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm shadow-md"
-              >
-                {state.loading ? 'Searching...' : 'Explore'}
-              </button>
-            </div>
-          </form>
+          <div ref={searchContainerRef} className="relative max-w-2xl mx-auto">
+            <form onSubmit={handleTextSearch} className="relative">
+              <div className="relative flex items-center">
+                <input
+                  type="text"
+                  placeholder="Enter biome name (e.g., 'Maharashtra', 'China', 'Amazon', 'Ladakh')..."
+                  value={textInput}
+                  onFocus={() => setShowSuggestions(true)}
+                  onChange={(e) => {
+                    setTextInput(e.target.value);
+                    setShowSuggestions(true);
+                    setHighlightedSuggestionIndex(-1);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setHighlightedSuggestionIndex(prev => 
+                        prev < suggestions.length - 1 ? prev + 1 : 0
+                      );
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setHighlightedSuggestionIndex(prev => 
+                        prev > 0 ? prev - 1 : suggestions.length - 1
+                      );
+                    } else if (e.key === 'Enter') {
+                      if (showSuggestions && highlightedSuggestionIndex >= 0 && suggestions[highlightedSuggestionIndex]) {
+                        e.preventDefault();
+                        const selected = suggestions[highlightedSuggestionIndex];
+                        setTextInput(selected.canonicalName);
+                        setShowSuggestions(false);
+                        executeTextSearch(selected.canonicalName);
+                      }
+                    } else if (e.key === 'Escape') {
+                      setShowSuggestions(false);
+                    }
+                  }}
+                  className="w-full pl-12 pr-32 py-4 bg-white border-2 border-[#E6E1D6] focus:border-[#4F6600] rounded-2xl shadow-sm text-base text-[#1D1B16] placeholder-[#797667] focus:outline-none transition-all"
+                />
+                <Search className="absolute left-4 text-[#797667]" size={20} />
+
+                {textInput && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTextInput('');
+                      setShowSuggestions(false);
+                    }}
+                    className="absolute right-28 p-1.5 text-[#797667] hover:text-[#1D1B16] hover:bg-[#F7F8F0] rounded-full transition-colors cursor-pointer"
+                    title="Clear search"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={state.loading || !textInput.trim()}
+                  className="absolute right-2.5 px-5 py-2.5 bg-[#4F6600] text-white font-bold rounded-xl hover:bg-[#3E5000] disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm shadow-md flex items-center gap-1.5 cursor-pointer"
+                >
+                  {state.loading ? (
+                    <>
+                      <RefreshCw size={14} className="animate-spin" />
+                      <span>Exploring...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Explore</span>
+                      <ChevronRight size={14} />
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            {/* Live Autocomplete Suggestions Dropdown */}
+            <AnimatePresence>
+              {showSuggestions && textInput.trim().length > 0 && suggestions.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute left-0 right-0 top-full mt-2 bg-white/95 backdrop-blur-md rounded-2xl border-2 border-[#E6E1D6] shadow-2xl overflow-hidden z-50 divide-y divide-[#F0EBE0]"
+                >
+                  <div className="p-2.5 bg-[#F7F8F0] flex items-center justify-between text-[11px] font-bold text-[#494631] px-4">
+                    <span className="flex items-center gap-1.5">
+                      <Compass size={14} className="text-[#4F6600]" />
+                      MATCHING LANDSCAPES ({suggestions.length})
+                    </span>
+                    <span className="text-[10px] text-[#797667] font-normal">Click or press Enter to view</span>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto">
+                    {suggestions.map((item, idx) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault(); // Prevents input blur before click registers
+                          setTextInput(item.canonicalName);
+                          setShowSuggestions(false);
+                          executeTextSearch(item.canonicalName);
+                        }}
+                        className={`w-full flex items-center gap-3.5 p-3 text-left transition-colors cursor-pointer ${
+                          idx === highlightedSuggestionIndex ? 'bg-[#F7F8F0]' : 'hover:bg-[#FAF9F5]'
+                        }`}
+                      >
+                        {item.photos?.[0]?.url ? (
+                          <img
+                            src={item.photos[0].url}
+                            alt={item.canonicalName}
+                            className="w-12 h-12 rounded-xl object-cover border border-[#E6E1D6] shrink-0"
+                          />
+                        ) : (
+                          <div className="w-12 h-12 rounded-xl bg-[#F7F8F0] flex items-center justify-center text-[#4F6600] shrink-0">
+                            <Globe2 size={20} />
+                          </div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="font-bold text-sm text-[#1D1B16] truncate">{item.canonicalName}</p>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                              item.isIndiaLandscape ? 'bg-[#EBF1D7] text-[#4F6600]' : 'bg-[#EFEFEF] text-[#555555]'
+                            }`}>
+                              {item.isIndiaLandscape ? 'India' : 'Global'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-[#797667] truncate mt-0.5">{item.biomeType} • {item.aliases.slice(0, 3).join(', ')}</p>
+                        </div>
+                        <ChevronRight size={18} className="text-[#797667] shrink-0" />
+                      </button>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
           {/* Quick Biome Suggestions */}
           {!state.result && !state.loading && (
@@ -799,6 +976,9 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* Anchor for Auto-Scrolling to Results */}
+          <div ref={resultsRef} className="scroll-mt-8" />
 
           {/* Core Interactive Area */}
           <AnimatePresence mode="wait">
